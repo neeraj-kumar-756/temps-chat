@@ -23,7 +23,7 @@ def create_app():
         pass
 
     db.init_app(app)
-    socketio.init_app(app, async_mode='gevent')
+    socketio.init_app(app, async_mode='gevent', manage_session=False, max_http_buffer_size=10485760, ping_timeout=60, ping_interval=25)
 
     from .routes import auth, chat
     app.register_blueprint(auth.bp)

@@ -6,21 +6,299 @@
     <div class="chat-container">
         <div class="chat-header">
             <h3>Channel: {{ channel_id }}</h3>
+            <button id="destroy_btn" class="destroy-btn">Delete Chat</button>
         </div>
         <div id="chat-window">
             <ul id="messages"></ul>
         </div>
         <div class="chat-input">
             <form id="message-form" action="#">
-                <input id="message_input" autocomplete="off" placeholder="Type a message..." /><button>Send</button>
+                <input id="message_input" autocomplete="off" placeholder="Type a message..." /><button type="submit">Send</button>
             </form>
         </div>
     </div>
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
     <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            initChat('{{ username }}', '{{ channel_id }}');
-        });
+        (function () {
+            const username = '{{ username }}';
+            const messagesEl = document.getElementById('messages');
+            const formEl = document.getElementById('message-form');
+            const inputEl = document.getElementById('message_input');
+
+            const socket = io();
+
+            let keyPair = null;
+            let peerPubKey = null;
+            let aesKey = null;
+            const pendingHistory = []; /* deprecated */
+
+            function ab2b64(arrayBuffer) {
+                const bytes = new Uint8Array(arrayBuffer);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                return btoa(binary);
+            }
+
+            function b64toAB(base64) {
+                const binaryString = atob(base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                return bytes.buffer;
+            }
+
+            async function generateKeyPair() {
+                try {
+                    keyPair = await window.crypto.subtle.generateKey(
+                        { name: 'ECDH', namedCurve: 'P-256' },
+                        true,
+                        ['deriveKey']
+                    );
+                    const jwk = await window.crypto.subtle.exportKey('jwk', keyPair.publicKey);
+                    console.log('Generated key pair, sending public key', jwk);
+                    socket.emit('send_public_key', { pubkey_jwk: jwk });
+                    socket.emit('exchange_pubkey', { pubkey_jwk: jwk });
+                } catch (err) {
+                    console.error('Key generation failed', err);
+                }
+            }
+
+            async function importPeerPublicKey(jwk) {
+                try {
+                    peerPubKey = await window.crypto.subtle.importKey(
+                        'jwk',
+                        jwk,
+                        { name: 'ECDH', namedCurve: 'P-256' },
+                        false,
+                        []
+                    );
+                } catch (err) {
+                    console.error('Import peer public key failed', err);
+                }
+            }
+
+            async function deriveAesKey() {
+                try {
+                    if (!keyPair || !peerPubKey) return;
+                    aesKey = await window.crypto.subtle.deriveKey(
+                        { name: 'ECDH', public: peerPubKey },
+                        keyPair.privateKey,
+                        { name: 'AES-GCM', length: 256 },
+                        false,
+                        ['encrypt', 'decrypt']
+                    );
+                    inputEl.disabled = false;
+                    formEl.querySelector('button[type="submit"]').disabled = false;
+                    inputEl.placeholder = 'Type a message...';
+                } catch (err) {
+                    console.error('Derive AES key failed', err);
+                }
+            }
+
+            async function encryptString(plaintext) {
+                try {
+                    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+                    const data = new TextEncoder().encode(String(plaintext));
+                    const cipher = await window.crypto.subtle.encrypt(
+                        { name: 'AES-GCM', iv },
+                        aesKey,
+                        data
+                    );
+                    return {
+                        ciphertext: ab2b64(cipher),
+                        iv: ab2b64(iv.buffer)
+                    };
+                } catch (err) {
+                    console.error('Encrypt failed', err);
+                    return null;
+                }
+            }
+
+            async function decryptToString(ciphertextB64, ivB64) {
+                try {
+                    const cipherAB = b64toAB(ciphertextB64);
+                    const ivAB = b64toAB(ivB64);
+                    const plaintextAB = await window.crypto.subtle.decrypt(
+                        { name: 'AES-GCM', iv: new Uint8Array(ivAB) },
+                        aesKey,
+                        cipherAB
+                    );
+                    return new TextDecoder().decode(plaintextAB);
+                } catch (err) {
+                    console.error('Decrypt failed', err);
+                    return '';
+                }
+            }
+
+            function renderMessage(sender, type, content, opts = {}) {
+                const li = document.createElement('li');
+                li.classList.add(sender === username ? 'my-message' : 'other-message');
+                const tag = document.createElement('span');
+                tag.className = 'sender-tag';
+                tag.textContent = sender;
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.textContent = content;
+                const meta = document.createElement('div');
+                meta.className = 'message-meta';
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'message-time';
+                timeSpan.textContent = opts.time || '';
+                const statusSpan = document.createElement('span');
+                statusSpan.className = 'message-status';
+                statusSpan.textContent = opts.status || '';
+                meta.appendChild(timeSpan);
+                meta.appendChild(statusSpan);
+                li.appendChild(tag);
+                li.appendChild(contentDiv);
+                li.appendChild(meta);
+                if (opts.id) {
+                    li.id = 'msg-' + opts.id;
+                }
+                messagesEl.appendChild(li);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                return { li, statusSpan };
+            }
+
+            function renderStatus(text) {
+                const li = document.createElement('li');
+                li.className = 'status';
+                li.textContent = text;
+                messagesEl.appendChild(li);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+
+            /* removed local pending processing */
+
+            socket.on('connect', async () => {
+                socket.emit('join', {});
+                await generateKeyPair();
+                inputEl.disabled = true;
+                formEl.querySelector('button[type="submit"]').disabled = true;
+                inputEl.placeholder = 'Waiting for peer to sync keys...';
+            });
+
+            socket.on('peer_pubkey', async (data) => {
+                try {
+                    console.log('Received peer_pubkey', data);
+                    await importPeerPublicKey(data.pubkey_jwk);
+                    await deriveAesKey();
+                } catch (err) {
+                    console.error('Peer key handling failed', err);
+                }
+            });
+            socket.on('receive_public_key', async (data) => {
+                try {
+                    console.log('Received receive_public_key', data);
+                    await importPeerPublicKey(data.pubkey_jwk);
+                    await deriveAesKey();
+                } catch (err) {
+                    console.error('Receive public key handling failed', err);
+                }
+            });
+            socket.on('peer_joined', async (data) => {
+                try {
+                    console.log('Peer joined event', data);
+                    if (!keyPair) await generateKeyPair();
+                    const jwk = await window.crypto.subtle.exportKey('jwk', keyPair.publicKey);
+                    console.log('Resending public key on peer_joined', jwk);
+                    socket.emit('send_public_key', { pubkey_jwk: jwk });
+                    socket.emit('exchange_pubkey', { pubkey_jwk: jwk });
+                } catch (err) {
+                    console.error('Peer joined handling failed', err);
+                }
+            });
+
+            socket.on('load_history', async (data) => {
+                const hist = (data.history || []).slice().sort((a,b) => (a.timestamp||0)-(b.timestamp||0));
+                if (aesKey) {
+                    for (const msg of hist) {
+                        const content = await decryptToString(msg.ciphertext, msg.iv);
+                        const t = new Date(msg.timestamp || Date.now());
+                        const hh = String(t.getHours()).padStart(2, '0');
+                        const mm = String(t.getMinutes()).padStart(2, '0');
+                        renderMessage(msg.username, msg.type, content, { time: `${hh}:${mm}`, id: msg.id });
+                    }
+                }
+            });
+
+            socket.on('encrypted_message', async (data) => {
+                if (!aesKey) return;
+                const content = await decryptToString(data.ciphertext, data.iv);
+                const t = new Date(data.timestamp || Date.now());
+                const hh = String(t.getHours()).padStart(2, '0');
+                const mm = String(t.getMinutes()).padStart(2, '0');
+                const existing = document.getElementById('msg-' + (data.id || ''));
+                if (existing) {
+                    const statusSpan = existing.querySelector('.message-status');
+                    if (statusSpan) statusSpan.textContent = 'Sent';
+                } else {
+                    renderMessage(data.username, data.type, content, { time: `${hh}:${mm}`, id: data.id });
+                }
+            });
+
+            socket.on('status', (data) => {
+                renderStatus(data.msg);
+            });
+
+            formEl.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const text = inputEl.value;
+                if (!text || !aesKey) return;
+                const timestamp = Date.now();
+                const id = crypto.randomUUID();
+                const rendered = renderMessage(username, 'text', text, { time: formatTime(timestamp), status: '🕓 Waiting', id });
+                const enc = await encryptString(text);
+                if (enc && enc.ciphertext && enc.iv) {
+                    socket.emit('encrypted_message', {
+                        id,
+                        type: 'text',
+                        ciphertext: enc.ciphertext,
+                        iv: enc.iv,
+                        timestamp
+                    });
+                } else {
+                    if (rendered.statusSpan) rendered.statusSpan.textContent = 'Failed';
+                }
+                inputEl.value = '';
+            });
+
+            inputEl.addEventListener('paste', (e) => {
+                /* allow default paste behavior for text and emojis */
+            });
+            inputEl.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    formEl.dispatchEvent(new Event('submit'));
+                }
+            });
+            function formatTime(ts) {
+                const t = new Date(ts);
+                const hh = String(t.getHours()).padStart(2, '0');
+                const mm = String(t.getMinutes()).padStart(2, '0');
+                return `${hh}:${mm}`;
+            }
+            const destroyBtn = document.getElementById('destroy_btn');
+            destroyBtn.addEventListener('click', () => {
+                socket.emit('destroy_room');
+            });
+            socket.on('room_destroyed', (_data) => {
+                keyPair = null;
+                peerPubKey = null;
+                aesKey = null;
+                messagesEl.innerHTML = '';
+                window.location.href = '/lobby';
+            });
+            socket.on('disconnect', () => {
+                aesKey = null;
+                inputEl.disabled = true;
+                formEl.querySelector('button[type="submit"]').disabled = true;
+                inputEl.placeholder = 'Waiting for peer to sync keys...';
+            });
+        })();
     </script>
 {% endblock %}

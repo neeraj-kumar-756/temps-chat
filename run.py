@@ -8,6 +8,7 @@ from geventwebsocket.handler import WebSocketHandler
 app = create_app()
 
 if __name__ == '__main__':
-    http_server = WSGIServer(('0.0.0.0', 5000), app, handler_class=WebSocketHandler)
+    app.debug = True  # Enable debug directly on the Flask app instead
+    server = WSGIServer(('0.0.0.0', 5000), app, handler_class=WebSocketHandler)
     print("Server started. Press Ctrl+C to quit.")
-    http_server.serve_forever()
+    server.serve_forever()
