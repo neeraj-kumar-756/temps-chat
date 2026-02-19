@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+
+{% block title %}Chat{% endblock %}
+
+{% block content %}
+    <div class="chat-container">
+        <div class="chat-header">
+            <h3>Channel: {{ channel_id }}</h3>
+        </div>
+        <div id="chat-window">
+            <ul id="messages"></ul>
+        </div>
+        <div class="chat-input">
+            <form id="message-form" action="#">
+                <input id="message_input" autocomplete="off" placeholder="Type a message..." /><button>Send</button>
+            </form>
+        </div>
+    </div>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            initChat('{{ username }}', '{{ channel_id }}');
+        });
+    </script>
+{% endblock %}

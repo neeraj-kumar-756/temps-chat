@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+
+{% block title %}Setup MFA{% endblock %}
+
+{% block content %}
+    <div class="form-container">
+        <h2>Setup Two-Factor Authentication</h2>
+        <p>Scan the QR code with your authenticator app.</p>
+        <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code">
+        <p><a href="{{ url_for('auth.login') }}">Continue to login</a></p>
+    </div>
+{% endblock %}
